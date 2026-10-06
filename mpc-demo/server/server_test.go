@@ -11,6 +11,10 @@ import (
 )
 
 func startTestServer(t *testing.T) (addr string, cleanup func()) {
+	return startTestServerWithTimeout(t, 0)
+}
+
+func startTestServerWithTimeout(t *testing.T, timeout time.Duration) (addr string, cleanup func()) {
 	t.Helper()
 
 	session, err := mpc.NewSession("HelloMPC", []string{"A", "B", "C"}, 2, map[string]string{
@@ -20,12 +24,16 @@ func startTestServer(t *testing.T) (addr string, cleanup func()) {
 		t.Fatalf("session: %v", err)
 	}
 
-	ln, err := net.Listen("tcp", "localhost:0") // port 0 = OS picks a free port
+	ln, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 
-	srv := &server{session: session, hub: make(map[string]net.Conn)}
+	srv := &server{
+		session: session,
+		hub:     make(map[string]net.Conn),
+		timeout: timeout,
+	}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -49,7 +57,6 @@ func clientAuth(t *testing.T, addr, party, pin string) proto.ServerMessage {
 
 	json.NewEncoder(conn).Encode(proto.AuthRequest{Party: party, PIN: pin})
 
-	// Read messages until connection closes or we get a terminal status.
 	var last proto.ServerMessage
 	dec := json.NewDecoder(conn)
 	for {
@@ -59,7 +66,7 @@ func clientAuth(t *testing.T, addr, party, pin string) proto.ServerMessage {
 			break
 		}
 		last = msg
-		if msg.Status == proto.StatusUnlocked || msg.Status == proto.StatusRejected || msg.Status == proto.StatusError {
+		if msg.Status == proto.StatusUnlocked || msg.Status == proto.StatusRejected || msg.Status == proto.StatusTimeout || msg.Status == proto.StatusError {
 			break
 		}
 	}
@@ -141,5 +148,72 @@ func TestAllThreeParties(t *testing.T) {
 	// At least 2 must receive the unlock (the 3rd might be waiting when broadcast fires)
 	if unlocked < 2 {
 		t.Errorf("expected at least 2 clients to receive unlock, got %d", unlocked)
+	}
+}
+
+func TestSessionTimeout(t *testing.T) {
+	addr, cleanup := startTestServerWithTimeout(t, 500*time.Millisecond)
+	defer cleanup()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	json.NewEncoder(conn).Encode(proto.AuthRequest{Party: "A", PIN: "123"})
+
+	dec := json.NewDecoder(conn)
+
+	var msg1 proto.ServerMessage
+	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	if err := dec.Decode(&msg1); err != nil {
+		t.Fatalf("read first message: %v", err)
+	}
+	if msg1.Status != proto.StatusWaiting {
+		t.Errorf("expected waiting, got %q", msg1.Status)
+	}
+
+	var msg2 proto.ServerMessage
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := dec.Decode(&msg2); err != nil {
+		t.Fatalf("read timeout message: %v", err)
+	}
+	if msg2.Status != proto.StatusTimeout {
+		t.Errorf("expected timeout, got %q (message: %s)", msg2.Status, msg2.Message)
+	}
+}
+
+func TestTimeoutThenNewSession(t *testing.T) {
+	addr, cleanup := startTestServerWithTimeout(t, 300*time.Millisecond)
+	defer cleanup()
+
+	conn1, _ := net.Dial("tcp", addr)
+	json.NewEncoder(conn1).Encode(proto.AuthRequest{Party: "A", PIN: "123"})
+
+	dec1 := json.NewDecoder(conn1)
+	var msg proto.ServerMessage
+	dec1.Decode(&msg)
+	dec1.Decode(&msg)
+	conn1.Close()
+
+	if msg.Status != proto.StatusTimeout {
+		t.Errorf("first session: expected timeout, got %q", msg.Status)
+	}
+
+	time.Sleep(400 * time.Millisecond)
+
+	var wg sync.WaitGroup
+	results := make([]proto.ServerMessage, 2)
+
+	wg.Add(2)
+	go func() { defer wg.Done(); results[0] = clientAuth(t, addr, "A", "123") }()
+	go func() { defer wg.Done(); results[1] = clientAuth(t, addr, "B", "456") }()
+	wg.Wait()
+
+	for i, r := range results {
+		if r.Status != proto.StatusUnlocked {
+			t.Errorf("second session client %d: expected unlocked, got %q", i, r.Status)
+		}
 	}
 }

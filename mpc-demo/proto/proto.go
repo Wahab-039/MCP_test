@@ -5,6 +5,7 @@ const (
 	StatusWaiting  = "waiting"
 	StatusUnlocked = "unlocked"
 	StatusRejected = "rejected"
+	StatusTimeout  = "timeout"
 	StatusError    = "error"
 )
 

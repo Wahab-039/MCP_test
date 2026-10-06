@@ -136,3 +136,10 @@ func (s *Session) registeredNames() string {
 	}
 	return strings.Join(names, ", ")
 }
+
+// Reset clears the authenticated parties list, allowing the session to be reused.
+func (s *Session) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authenticated = nil
+}

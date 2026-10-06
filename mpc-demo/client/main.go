@@ -67,6 +67,12 @@ func main() {
 			fmt.Printf("  └─────────────────────────────────┘\n\n")
 			return
 
+		case proto.StatusTimeout:
+			fmt.Println("\n  ✗ Session timeout")
+			fmt.Printf("  ✗ %s\n", msg.Message)
+			fmt.Println("  ✗ Secret remains locked\n")
+			os.Exit(1)
+
 		case proto.StatusError:
 			fmt.Printf("\n  ✗ Server error: %s\n\n", msg.Message)
 			os.Exit(1)
